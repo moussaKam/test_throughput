@@ -1,38 +1,43 @@
 import time
-from vllm import LLM
-from transformers import AutoTokenizer
-from datasets import load_dataset
 import argparse
-
 from vllm import LLM, SamplingParams
 from transformers import AutoTokenizer
 from datasets import load_dataset
-import time
-import argparse
 
 def estimate_llm_throughput(model_name, dataset_name, num_samples, max_tokens, temperature, max_model_len):
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     llm = LLM(model=model_name, max_model_len=max_model_len)
 
-    dataset = load_dataset(dataset_name, split=f"test_sft[:{num_samples}]")
+    # Load dataset safely
+    try:
+        dataset = load_dataset(dataset_name, split=f"test_sft[:{num_samples}]")
+    except Exception:
+        dataset = load_dataset(dataset_name, split=f"train[:{num_samples}]")
+
     prompts = []
     for item in dataset:
         if "prompt" in item:
-            prompts.append(tokenizer.apply_chat_template([{"role": "user", "content": item["prompt"]}], tokenize=False))
+            messages = [{"role": "user", "content": item["prompt"]}]
         elif "messages" in item:
-            prompts.append(tokenizer.apply_chat_template(item["messages"], tokenize=False))
+            messages = item["messages"]
         else:
-            prompts.append(tokenizer.apply_chat_template([{"role": "user", "content": item["text"]}], tokenize=False))
+            messages = [{"role": "user", "content": item.get("text", "")}]
+        
+        if hasattr(tokenizer, "apply_chat_template"):
+            prompt = tokenizer.apply_chat_template(messages, tokenize=False)
+        else:
+            prompt = messages[-1]["content"]
+        prompts.append(prompt)
+        
         if len(prompts) >= num_samples:
             break
 
-    prompts = prompts[:num_samples]
-    print(prompts[0])
+    if not prompts:
+        raise ValueError("No valid prompts extracted from dataset.")
 
-    sampling_params = SamplingParams(
-        max_tokens=max_tokens,
-        temperature=temperature
-    )
+    print("Example prompt:", prompts[0][:200])
+
+    sampling_params = SamplingParams(max_tokens=max_tokens, temperature=temperature, n=1)
 
     start_time = time.time()
     outputs = llm.generate(prompts, sampling_params)
@@ -46,10 +51,10 @@ def estimate_llm_throughput(model_name, dataset_name, num_samples, max_tokens, t
     input_throughput = total_input_tokens / total_generation_time
     total_throughput = (total_input_tokens + total_output_tokens) / total_generation_time
 
-    print(f"Throughput Estimation Results:")
+    print(f"\nThroughput Estimation Results:")
     print(f"Model: {model_name}")
     print(f"Dataset: {dataset_name}")
-    print(f"Samples: {num_samples}")
+    print(f"Samples: {len(prompts)}")
     print(f"Max tokens per output: {max_tokens}")
     print(f"Total time: {total_generation_time:.2f}s")
     print(f"Total input tokens: {total_input_tokens}")
@@ -61,52 +66,16 @@ def estimate_llm_throughput(model_name, dataset_name, num_samples, max_tokens, t
 
 def main():
     parser = argparse.ArgumentParser(description="Estimate LLM throughput using vLLM")
-    parser.add_argument(
-        "--model_name",
-        type=str,
-        default="Qwen/Qwen3-4B-Instruct-2507",
-        help="Model name or path (default: Qwen/Qwen3-4B-Instruct-2507)"
-    )
-    parser.add_argument(
-        "--dataset_name",
-        type=str,
-        default="HuggingFaceH4/ultrachat_200k",
-        help="Dataset name (default: HuggingFaceH4/ultrachat_200k)"
-    )
-    parser.add_argument(
-        "--num_samples",
-        type=int,
-        default=10000,
-        help="Number of samples to process (default: 10000)"
-    )
-    parser.add_argument(
-        "--max_tokens",
-        type=int,
-        default=512,
-        help="Maximum number of tokens to generate per sample (default: 512)"
-    )
-    parser.add_argument(
-        "--temperature",
-        type=float,
-        default=0.8,
-        help="Sampling temperature (default: 0.8)"
-    )
-    parser.add_argument(
-        "--max_model_len",
-        type=int,
-        default=4096,
-        help="Maximum model length (default: 4096)"
-    )
-
+    parser.add_argument("--model_name", type=str, default="Qwen/Qwen3-4B-Instruct-2507")
+    parser.add_argument("--dataset_name", type=str, default="HuggingFaceH4/ultrachat_200k")
+    parser.add_argument("--num_samples", type=int, default=1000)
+    parser.add_argument("--max_tokens", type=int, default=512)
+    parser.add_argument("--temperature", type=float, default=0.8)
+    parser.add_argument("--max_model_len", type=int, default=4096)
     args = parser.parse_args()
-    estimate_llm_throughput(
-        model_name=args.model_name,
-        dataset_name=args.dataset_name,
-        num_samples=args.num_samples,
-        max_tokens=args.max_tokens,
-        temperature=args.temperature,
-        max_model_len=args.max_model_len
-    )
+
+    estimate_llm_throughput(**vars(args))
+
 
 if __name__ == "__main__":
     main()
